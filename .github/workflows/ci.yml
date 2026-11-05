@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Release logic
+        run: bash test/prepare-release.sh
+
+      - name: Lint workflows
+        run: |
+          set -euo pipefail
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color .github/workflows/*.yml examples/*.yml
+
+      # actionlint reads action.yml as a workflow, so the composite action
+      # contract is checked here instead.
+      - name: Check action.yml files
+        run: |
+          ruby -ryaml -e '
+            ok = true
+            Dir.glob("*/action.yml").sort.each do |path|
+              doc = YAML.load_file(path)
+              problems = []
+              problems << "missing name" if doc["name"].to_s.empty?
+              problems << "missing description" if doc["description"].to_s.empty?
+              problems << "runs.using must be composite" unless doc.dig("runs", "using") == "composite"
+              (doc.dig("runs", "steps") || []).each_with_index do |step, i|
+                problems << "step #{i}: run without shell" if step["run"] && !step["shell"]
+                problems << "step #{i}: uses without @ref" if step["uses"] && !step["uses"].include?("@")
+              end
+              problems.each { |p| warn "#{path}: #{p}"; ok = false }
+              puts "#{path}: #{doc["name"]}"
+            end
+            exit(ok ? 0 : 1)
+          '

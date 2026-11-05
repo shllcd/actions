@@ -1,0 +1,71 @@
+name: Setup Rust
+description: Set up a Rust toolchain for CI.
+
+inputs:
+  toolchain:
+    description: Toolchain to install
+    default: stable
+  targets:
+    description: Comma-separated rustup targets
+    default: ''
+  components:
+    description: Comma-separated rustup components (e.g. clippy,rustfmt)
+    default: ''
+  cache:
+    description: Restore the cargo cache. Ignored when sccache is on, so the two do not both carry target/
+    default: 'true'
+  sccache:
+    description: Compile through sccache (GitHub Actions cache backend)
+    default: 'false'
+  zig:
+    description: Install zig and cargo-zigbuild for cross-arch and musl Linux builds
+    default: 'false'
+  apt:
+    description: Space-separated apt packages for Linux runners (e.g. libgtk-3-dev)
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install toolchain
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        TARGETS: ${{ inputs.targets }}
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        rustup toolchain install "$TOOLCHAIN" --profile minimal --no-self-update
+        rustup default "$TOOLCHAIN"
+        if [ -n "$COMPONENTS" ]; then
+          rustup component add --toolchain "$TOOLCHAIN" ${COMPONENTS//,/ }
+        fi
+        if [ -n "$TARGETS" ]; then
+          for target in ${TARGETS//,/ }; do
+            rustup target add --toolchain "$TOOLCHAIN" "$target"
+          done
+        fi
+
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      if: inputs.cache == 'true' && inputs.sccache != 'true'
+
+    - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      if: inputs.sccache == 'true'
+
+    - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      if: inputs.zig == 'true'
+
+    - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      if: inputs.zig == 'true'
+      with:
+        tool: cargo-zigbuild
+
+    - name: Install Linux packages
+      if: inputs.apt != '' && runner.os == 'Linux'
+      shell: bash
+      env:
+        APT: ${{ inputs.apt }}
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends $APT

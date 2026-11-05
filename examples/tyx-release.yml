@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit, tag and release
+      id-token: write # crates.io OIDC, no token in secrets
+    steps:
+      - name: Require default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Releases run from ${{ github.event.repository.default_branch }} only"
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Version, Cargo.toml (including path dependencies), Cargo.lock and
+      # CHANGELOG.md in one step. Deterministic: the same input always gives the
+      # same version, so no release patch has to be passed between jobs.
+      - id: version
+        uses: shllcd/actions/prepare-release@v1
+        with:
+          source: changelog
+          write-manifest: true
+          write-changelog: true
+
+      - uses: shllcd/actions/setup-rust@v1
+
+      - uses: shllcd/actions/publish-crates@v1
+        with:
+          version: ${{ steps.version.outputs.version }}
+          packages: tyx-derive, tyx-ir, tyx
+
+      - uses: shllcd/actions/publish-release@v1
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          notes: ${{ steps.version.outputs.notes }}
+          files: '' # crates only, no binaries

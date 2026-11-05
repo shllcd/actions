@@ -1,0 +1,28 @@
+name: Changesets
+description: Apply pending changesets and read the new version and notes.
+
+inputs:
+  package:
+    description: Package directory whose version and CHANGELOG are released
+    default: '.'
+  manager:
+    description: auto, npm, pnpm or yarn
+    default: auto
+
+outputs:
+  version:
+    description: New version, e.g. 1.5.0
+    value: ${{ steps.changesets.outputs.version }}
+  notes:
+    description: Top section of the package CHANGELOG as text
+    value: ${{ steps.changesets.outputs.notes }}
+
+runs:
+  using: composite
+  steps:
+    - id: changesets
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MANAGER: ${{ inputs.manager }}
+      run: bash "$GITHUB_ACTION_PATH/changesets.sh" "$PACKAGE" "$MANAGER"

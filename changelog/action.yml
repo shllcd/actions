@@ -1,0 +1,42 @@
+name: Changelog
+description: Get the next version and release notes from CHANGELOG.md.
+
+inputs:
+  changelog:
+    description: Changelog file
+    default: CHANGELOG.md
+  bump:
+    description: auto, major, minor or patch
+    default: auto
+  write:
+    description: Move the Unreleased entries under the new version heading
+    default: 'false'
+
+outputs:
+  version:
+    description: Next version, e.g. 1.5.0
+    value: ${{ steps.changelog.outputs.version }}
+  previous:
+    description: Previously released version
+    value: ${{ steps.changelog.outputs.previous }}
+  bump:
+    description: Resolved bump, major, minor or patch
+    value: ${{ steps.changelog.outputs.bump }}
+  notes:
+    description: The Unreleased section as text
+    value: ${{ steps.changelog.outputs.notes }}
+
+runs:
+  using: composite
+  steps:
+    - id: changelog
+      shell: bash
+      env:
+        CHANGELOG: ${{ inputs.changelog }}
+        BUMP: ${{ inputs.bump }}
+        WRITE: ${{ inputs.write }}
+      run: |
+        set -euo pipefail
+        args=(--changelog "$CHANGELOG" --bump "$BUMP")
+        [ "$WRITE" = 'true' ] && args+=(--write)
+        node "$GITHUB_ACTION_PATH/changelog.mjs" "${args[@]}"

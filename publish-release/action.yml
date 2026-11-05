@@ -1,0 +1,164 @@
+name: Publish GitHub release
+description: Commit the version bump and create a GitHub release with build artifacts.
+
+inputs:
+  tag:
+    description: Tag to create or update, e.g. v1.5.0
+    required: true
+  notes:
+    description: Release notes as text. Wins over notes-file
+    default: ''
+  notes-file:
+    description: Release notes file. Falls back to GitHub generated notes
+    default: ''
+  files:
+    description: Newline-separated files or globs to attach. Empty publishes notes only
+    default: dist/*
+  draft:
+    description: Create the release as a draft
+    default: 'false'
+  prerelease:
+    description: Mark the release as a prerelease
+    default: 'false'
+  commit:
+    description: Commit and push the version bump before tagging
+    default: 'true'
+  branch:
+    description: Branch to push the bump to
+    default: ${{ github.ref_name }}
+  paths:
+    description: Space-separated paths to stage. Everything by default
+    default: '.'
+  token:
+    description: Token with contents write. Defaults to the workflow token
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Refresh Cargo.lock
+      if: inputs.commit == 'true' && hashFiles('Cargo.toml') != ''
+      shell: bash
+      run: cargo metadata --format-version 1 > /dev/null
+
+    # Before the tag, so the tag lands on the commit that holds the bump.
+    - name: Commit and push
+      if: inputs.commit == 'true'
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+        BRANCH: ${{ inputs.branch }}
+        REF_TYPE: ${{ github.ref_type }}
+        PATHS: ${{ inputs.paths }}
+      run: |
+        set -euo pipefail
+        if [ "$REF_TYPE" = tag ]; then
+          echo "::error::this run is on tag $BRANCH; pass branch: explicitly, or commit: false"
+          exit 1
+        fi
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+        # The bump may already be committed by a previous run of the workflow.
+        git add -A -- $PATHS
+        if git diff --cached --quiet; then
+          echo "nothing to commit, $BRANCH is already released"
+          exit 0
+        fi
+
+        git commit -m "release: $TAG"
+        git push origin "HEAD:$BRANCH"
+
+    - name: Checksums
+      if: inputs.files != ''
+      shell: bash
+      env:
+        FILES: ${{ inputs.files }}
+      run: |
+        set -euo pipefail
+        files=()
+        while IFS= read -r pattern; do
+          [ -z "$pattern" ] && continue
+          for file in $pattern; do
+            [ -f "$file" ] && files+=("$file")
+          done
+        done <<< "$FILES"
+
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "::error::no release files matched: $FILES"
+          ls -R
+          exit 1
+        fi
+
+        cd "$(dirname "${files[0]}")"
+        names=()
+        for file in "${files[@]}"; do names+=("$(basename "$file")"); done
+        sha256sum -- "${names[@]}" > SHA256SUMS
+        cat SHA256SUMS
+
+    - name: Create or update the release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token || github.token }}
+        TAG: ${{ inputs.tag }}
+        NOTES: ${{ inputs.notes }}
+        NOTES_FILE: ${{ inputs.notes-file }}
+        DRAFT: ${{ inputs.draft }}
+        PRERELEASE: ${{ inputs.prerelease }}
+        FILES: ${{ inputs.files }}
+      run: |
+        set -euo pipefail
+        if [ -z "$NOTES_FILE" ] && [ -n "$NOTES" ]; then
+          NOTES_FILE="$RUNNER_TEMP/release-notes.md"
+          printf '%s\n' "$NOTES" > "$NOTES_FILE"
+        fi
+        files=()
+        if [ -n "$FILES" ]; then
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            for file in $pattern; do [ -f "$file" ] && files+=("$file"); done
+          done <<< "$FILES"
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no release files matched: $FILES"
+            exit 1
+          fi
+          sums="$(dirname "${files[0]}")/SHA256SUMS"
+          case " ${files[*]} " in *" $sums "*) ;; *) files+=("$sums") ;; esac
+        fi
+
+        flags=()
+        [ "$DRAFT" = 'true' ] && flags+=(--draft)
+        [ "$PRERELEASE" = 'true' ] && flags+=(--prerelease)
+
+        if gh release view "$TAG" > /dev/null 2>&1; then
+          echo "release $TAG exists, updating"
+          [ ${#files[@]} -gt 0 ] && gh release upload "$TAG" ${files[@]+"${files[@]}"} --clobber
+          if [ -n "$NOTES_FILE" ]; then
+            gh release edit "$TAG" --notes-file "$NOTES_FILE" ${flags[@]+"${flags[@]}"}
+          fi
+          exit 0
+        fi
+
+        # A published tag is immutable for consumers: fail instead of moving it.
+        if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+          current=$(git rev-parse "refs/tags/$TAG^{commit}")
+          head=$(git rev-parse HEAD)
+          if [ "$current" != "$head" ]; then
+            echo "::error::tag $TAG points at ${current:0:12}, refusing to move it to ${head:0:12}"
+            exit 1
+          fi
+          echo "tag $TAG already points at HEAD"
+        else
+          # Tag here, so the release cannot land on another commit.
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+        fi
+
+        set -- release create "$TAG" --verify-tag --title "$TAG" ${flags[@]+"${flags[@]}"}
+        if [ -n "$NOTES_FILE" ]; then
+          set -- "$@" --notes-file "$NOTES_FILE"
+        else
+          set -- "$@" --generate-notes
+        fi
+        [ ${#files[@]} -gt 0 ] && set -- "$@" ${files[@]+"${files[@]}"}
+        gh "$@"

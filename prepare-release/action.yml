@@ -1,0 +1,129 @@
+name: Prepare release
+description: Determine the next version and release notes.
+
+inputs:
+  source:
+    description: >-
+      Where the version comes from: changelog, changesets, or empty for the
+      version input, or the latest tag plus bump
+    default: ''
+  version:
+    description: Explicit version, for an empty source
+    default: ''
+  bump:
+    description: auto, major, minor or patch. Without a source, auto is patch
+    default: auto
+  tag-prefix:
+    description: Tag prefix
+    default: v
+  changelog:
+    description: Changelog file, for source changelog
+    default: CHANGELOG.md
+  write-changelog:
+    description: Move the Unreleased entries under the new version heading, for source changelog
+    default: 'false'
+  package:
+    description: Package directory whose version and CHANGELOG are released, for source changesets
+    default: '.'
+  manager:
+    description: auto, npm, pnpm or yarn, for source changesets
+    default: auto
+  write-manifest:
+    description: >-
+      Write the version into package.json (and optionalDependencies) plus
+      Cargo.toml (package and path dependencies), then refresh Cargo.lock.
+      changesets writes manifests itself, so this is ignored there.
+    default: 'false'
+  manifest-dir:
+    description: Directory with package.json and Cargo.toml, for monorepo subpackages
+    default: '.'
+  notes-file:
+    description: Also write the release notes to this file
+    default: ''
+
+outputs:
+  version:
+    description: Next version, e.g. 1.5.0
+    value: ${{ steps.release.outputs.version }}
+  tag:
+    description: Next tag, e.g. v1.5.0
+    value: ${{ steps.release.outputs.tag }}
+  previous:
+    description: Previously released version, empty with changesets or an explicit version
+    value: ${{ steps.release.outputs.previous }}
+  bump:
+    description: Resolved bump (major, minor, patch or changesets)
+    value: ${{ steps.release.outputs.bump }}
+  notes:
+    description: Release notes as text, empty without a source
+    value: ${{ steps.release.outputs.notes }}
+  notes-file:
+    description: Path to the release notes, valid only in this job
+    value: ${{ steps.release.outputs.notes-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check source
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+      run: |
+        case "$SOURCE" in
+          ''|changelog|changesets) ;;
+          *) echo "::error::unknown source \"$SOURCE\": changelog, changesets or empty"; exit 1 ;;
+        esac
+
+    - name: Changelog
+      id: changelog
+      if: inputs.source == 'changelog'
+      shell: bash
+      env:
+        CHANGELOG: ${{ inputs.changelog }}
+        BUMP: ${{ inputs.bump }}
+        WRITE: ${{ inputs.write-changelog }}
+      run: |
+        set -euo pipefail
+        args=(--changelog "$CHANGELOG" --bump "$BUMP")
+        [ "$WRITE" = 'true' ] && args+=(--write)
+        node "$GITHUB_ACTION_PATH/../changelog/changelog.mjs" "${args[@]}"
+
+    - name: Changesets
+      id: changesets
+      if: inputs.source == 'changesets'
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MANAGER: ${{ inputs.manager }}
+      run: bash "$GITHUB_ACTION_PATH/../changesets/changesets.sh" "$PACKAGE" "$MANAGER"
+
+    - name: Resolve release
+      id: release
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source }}
+        VERSION: ${{ steps.changelog.outputs.version || steps.changesets.outputs.version || inputs.version }}
+        PREVIOUS: ${{ steps.changelog.outputs.previous }}
+        BUMP: ${{ steps.changelog.outputs.bump || steps.changesets.outputs.bump || inputs.bump }}
+        NOTES: ${{ steps.changelog.outputs.notes || steps.changesets.outputs.notes }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        NOTES_FILE: ${{ inputs.notes-file }}
+        WRITE_MANIFEST: ${{ inputs.write-manifest }}
+        MANIFEST_DIR: ${{ inputs.manifest-dir }}
+      run: |
+        set -euo pipefail
+        args=(--bump "$BUMP" --tag-prefix "$TAG_PREFIX")
+        [ -n "$VERSION" ] && args+=(--version "$VERSION")
+        [ -n "$PREVIOUS" ] && args+=(--previous "$PREVIOUS")
+        [ -n "$NOTES_FILE" ] && args+=(--notes-file "$NOTES_FILE")
+        [ "$WRITE_MANIFEST" = 'true' ] && [ "$SOURCE" != changesets ] &&
+          args+=(--write-manifest --manifest-dir "$MANIFEST_DIR")
+        node "$GITHUB_ACTION_PATH/release.mjs" "${args[@]}"
+
+    - name: Refresh Cargo.lock
+      if: >-
+        inputs.source != 'changesets' && inputs.write-manifest == 'true' &&
+        hashFiles('Cargo.toml', '**/Cargo.toml') != ''
+      shell: bash
+      working-directory: ${{ inputs.manifest-dir }}
+      run: cargo metadata --format-version 1 > /dev/null

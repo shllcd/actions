@@ -1,0 +1,145 @@
+name: Cargo build
+description: Build a Rust binary for release.
+
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+  package:
+    description: Workspace package to build (-p)
+    default: ''
+  bin:
+    description: Binary to build and ship. Defaults to the first bin target
+    default: ''
+  args:
+    description: Extra cargo arguments (e.g. --features foo)
+    default: ''
+  linker:
+    description: auto, zig or native. auto picks zig for Linux targets
+    default: auto
+  glibc:
+    description: glibc floor for zig-built gnu targets (e.g. .2.17)
+    default: ''
+  locked:
+    description: Require an up-to-date Cargo.lock
+    default: 'true'
+  artifact-prefix:
+    description: Artifact name prefix
+    default: ${{ github.event.repository.name }}
+  retention-days:
+    description: Artifact retention
+    default: '1'
+
+outputs:
+  archive:
+    description: Path to the .tar.gz archive (Windows also gets a .zip)
+    value: ${{ steps.package.outputs.archive }}
+  sha256:
+    description: Archive checksum
+    value: ${{ steps.package.outputs.sha256 }}
+
+runs:
+  using: composite
+  steps:
+    - name: Add target
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: rustup target add "$TARGET"
+
+    - name: Resolve binary
+      id: resolve
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        BIN: ${{ inputs.bin }}
+      run: |
+        set -euo pipefail
+        if [ -n "$BIN" ]; then
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        name=$(cargo metadata --no-deps --format-version 1 |
+          jq -r --arg pkg "$PACKAGE" '
+            .packages[]
+            | select($pkg == "" or .name == $pkg)
+            | .targets[]
+            | select(.kind | index("bin"))
+            | .name' | head -n1)
+        [ -n "$name" ] || { echo "::error::no bin target found; pass 'bin:'"; exit 1; }
+        echo "bin=$name" >> "$GITHUB_OUTPUT"
+
+    - name: Build
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        PACKAGE: ${{ inputs.package }}
+        BIN: ${{ steps.resolve.outputs.bin }}
+        ARGS: ${{ inputs.args }}
+        LINKER: ${{ inputs.linker }}
+        GLIBC: ${{ inputs.glibc }}
+        LOCKED: ${{ inputs.locked }}
+      run: |
+        set -euo pipefail
+        linker="$LINKER"
+        if [ "$linker" = auto ]; then
+          case "$TARGET" in
+            *-linux-*) linker=zig ;;
+            *) linker=native ;;
+          esac
+        fi
+        # cargo-zigbuild replaces the `build` subcommand, it does not wrap it
+        cmd=cargo
+        args='build'
+        if [ "$linker" = zig ]; then
+          cmd='cargo zigbuild'
+          args=''
+          TARGET="$TARGET$GLIBC"
+        fi
+        set -- $args --release --target "$TARGET"
+        [ "$LOCKED" = 'true' ] && set -- "$@" --locked
+        [ -n "$PACKAGE" ] && set -- "$@" -p "$PACKAGE"
+        [ -n "$BIN" ] && set -- "$@" --bin "$BIN"
+        set -x
+        $cmd "$@" $ARGS
+
+    - name: Package
+      id: package
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        NAME: ${{ steps.resolve.outputs.bin }}
+      run: |
+        set -euo pipefail
+        ext=''
+        [ "$RUNNER_OS" = Windows ] && ext='.exe'
+        binary="target/$TARGET/release/$NAME$ext"
+        [ -f "$binary" ] || { echo "::error::binary not found: $binary"; exit 1; }
+
+        stage=$(mktemp -d)
+        cp "$binary" "$stage/"
+        for file in README.md LICENSE LICENSE-MIT LICENSE-APACHE; do
+          [ -f "$file" ] && cp "$file" "$stage/"
+        done
+
+        mkdir -p dist
+        archive="dist/$NAME-$TARGET.tar.gz"
+        tar -czf "$archive" -C "$stage" .
+        if [ "$RUNNER_OS" = Windows ]; then
+          (cd "$stage" && 7z a -tzip "$GITHUB_WORKSPACE/dist/$NAME-$TARGET.zip" . > /dev/null)
+        fi
+
+        # macOS has no sha256sum unless coreutils is installed
+        sha=$( { sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive"; } | cut -d' ' -f1)
+        echo "$sha  $(basename "$archive")" > "dist/$NAME-$TARGET.sha256"
+        echo "archive=$archive" >> "$GITHUB_OUTPUT"
+        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.artifact-prefix }}-${{ inputs.target }}
+        path: |
+          dist/${{ steps.resolve.outputs.bin }}-${{ inputs.target }}.*
+        overwrite: true
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error

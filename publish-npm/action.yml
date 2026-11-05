@@ -1,0 +1,117 @@
+name: Publish npm
+description: Publish packages to npm.
+
+inputs:
+  path:
+    description: Package directory, or the workspace root when workspace is true
+    default: '.'
+  dirs:
+    description: Newline-separated directories to publish one by one (native packages). Overrides path
+    default: ''
+  version:
+    description: Version being published, for the already-published check. Read from package.json when empty
+    default: ''
+  manager:
+    description: auto, npm, pnpm or yarn. auto follows the lockfile
+    default: auto
+  workspace:
+    description: Publish every package in the workspace (pnpm only)
+    default: 'false'
+  access:
+    description: public or restricted
+    default: public
+  provenance:
+    description: Publish with provenance (needs id-token write)
+    default: 'true'
+  dist-tag:
+    description: npm dist-tag
+    default: latest
+  args:
+    description: Extra publish arguments
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Publish
+      shell: bash
+      env:
+        DIR: ${{ inputs.path }}
+        DIRS: ${{ inputs.dirs }}
+        VERSION: ${{ inputs.version }}
+        MANAGER: ${{ inputs.manager }}
+        WORKSPACE: ${{ inputs.workspace }}
+        ACCESS: ${{ inputs.access }}
+        PROVENANCE: ${{ inputs.provenance }}
+        DIST_TAG: ${{ inputs.dist-tag }}
+        ARGS: ${{ inputs.args }}
+      run: |
+        set -euo pipefail
+        cd "$DIR" || exit 1
+        root="$PWD"
+
+        if [ "$MANAGER" = auto ]; then
+          if [ -f pnpm-lock.yaml ]; then MANAGER=pnpm
+          elif [ -f yarn.lock ]; then MANAGER=yarn
+          else MANAGER=npm
+          fi
+        fi
+
+        cmd="$MANAGER publish"
+        yarn_flags=()
+        if [ "$MANAGER" = yarn ]; then
+          if [ "$(yarn --version | cut -d. -f1)" -ge 2 ]; then
+            # Berry owns the republish check, so a re-run stays green.
+            cmd='yarn npm publish'
+            yarn_flags+=(--tolerate-republish)
+          else
+            cmd='yarn publish --non-interactive --no-git-tag-version'
+            PROVENANCE=false # classic yarn cannot sign provenance
+          fi
+        fi
+        if [ "$MANAGER" = pnpm ] && [ "$WORKSPACE" = 'true' ]; then
+          cmd='pnpm publish -r' # pnpm skips versions already in the registry
+        fi
+
+        publish() {
+          local version name
+          version="$VERSION"
+          if [ -z "$version" ]; then
+            version=$(node -p "require('./package.json').version")
+          fi
+          name=$(node -p "require('./package.json').name" 2>/dev/null || echo '')
+
+          if [ -n "$name" ] && [ "$WORKSPACE" != 'true' ] &&
+            npm view "$name@$version" version > /dev/null 2>&1; then
+            echo "$name@$version is already published, skipping"
+            return 0
+          fi
+
+          local flags=(--access "$ACCESS" --tag "$DIST_TAG")
+          [ "$PROVENANCE" = 'true' ] && flags+=(--provenance)
+          [ "$MANAGER" = pnpm ] && flags+=(--no-git-checks)
+          for flag in ${yarn_flags[@]+"${yarn_flags[@]}"}; do flags+=("$flag"); done
+          set -x
+          $cmd "${flags[@]}" $ARGS
+          set +x
+        }
+
+        if [ -n "$DIRS" ]; then
+          shopt -s nullglob
+          while IFS= read -r pattern; do
+            [ -z "$pattern" ] && continue
+            matches=( $root/$pattern )
+            dirs=()
+            for match in ${matches[@]+"${matches[@]}"}; do [ -d "$match" ] && dirs+=("$match"); done
+            if [ ${#dirs[@]} -eq 0 ]; then
+              echo "::error::no directories matched: $pattern"
+              exit 1
+            fi
+            for dir in "${dirs[@]}"; do
+              echo "publishing ${dir#"$root"/}"
+              ( cd "$dir" && publish )
+            done
+          done <<< "$DIRS"
+        else
+          publish
+        fi

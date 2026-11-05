@@ -101,7 +101,7 @@ jobs:
           GLIBC: ${{ inputs.glibc }}
         run: |
           set -euo pipefail
-          matrix=$(printf '%s\n' ${TARGETS//,/ } | jq -Rnc '[inputs | select(. != "") | {
+          matrix=$(printf '%s\n' "$TARGETS" | tr -s ', \t' '\n' | jq -Rnc '[inputs | select(. != "") | {
             target: .,
             host: (if test("windows") then "windows-latest" elif test("apple") then "macos-latest" else "ubuntu-latest" end),
             zig: test("linux"),

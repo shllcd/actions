@@ -1,0 +1,47 @@
+name: N-API packages
+description: Turn N-API binding artifacts into per-platform npm packages.
+
+inputs:
+  artifacts:
+    description: Directory searched for <name>.<target>.node files (download-artifact path)
+    default: artifacts
+  package-dir:
+    description: Main package directory. Its package.json gives the name, version, license and repository
+    default: '.'
+  name:
+    description: Package name template. {name} is the main package name, {platform} the napi-rs platform (e.g. @orisu/binding-{platform})
+    default: '{name}-{platform}'
+  version:
+    description: Version for the packages. Read from the main package.json when empty
+    default: ''
+  out:
+    description: Output directory, one subdirectory per platform
+    default: dist/npm
+
+outputs:
+  dir:
+    description: Output directory, pass dirs = <dir>/* to publish-npm
+    value: ${{ steps.packages.outputs.dir }}
+  dirs:
+    description: Newline-separated package directories
+    value: ${{ steps.packages.outputs.dirs }}
+  packages:
+    description: Newline-separated package names
+    value: ${{ steps.packages.outputs.packages }}
+
+runs:
+  using: composite
+  steps:
+    - id: packages
+      shell: bash
+      env:
+        ARTIFACTS: ${{ inputs.artifacts }}
+        PACKAGE_DIR: ${{ inputs.package-dir }}
+        NAME: ${{ inputs.name }}
+        VERSION: ${{ inputs.version }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        args=(--artifacts "$ARTIFACTS" --package-dir "$PACKAGE_DIR" --name "$NAME" --out "$OUT")
+        [ -n "$VERSION" ] && args+=(--version "$VERSION")
+        node "$GITHUB_ACTION_PATH/napi-packages.mjs" "${args[@]}"

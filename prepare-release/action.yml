@@ -40,6 +40,20 @@ inputs:
   notes-file:
     description: Also write the release notes to this file
     default: ''
+  version-files:
+    description: >-
+      Newline-separated path:regex pairs for versions the manifests do not
+      cover, e.g. src/cli.ts:const VERSION = "([^"]*)". The first capture group
+      is replaced with the version. A regex that matches nothing fails the step.
+    default: ''
+  date:
+    description: >-
+      Release date, yyyy-mm-dd, for the changelog heading. Today (UTC) when
+      empty. Pass the date output of the first job so every job agrees.
+    default: ''
+  require-default-branch:
+    description: Fail unless the run is on the repository default branch
+    default: 'false'
 
 outputs:
   version:
@@ -60,19 +74,43 @@ outputs:
   notes-file:
     description: Path to the release notes, valid only in this job
     value: ${{ steps.release.outputs.notes-file }}
+  date:
+    description: Release date, yyyy-mm-dd
+    value: ${{ steps.release.outputs.date }}
+  changed-files:
+    description: >-
+      Newline-separated files this action changed. publish-release commits
+      only these by default
+    value: ${{ steps.changed.outputs.files }}
 
 runs:
   using: composite
   steps:
-    - name: Check source
+    - name: Check inputs
       shell: bash
       env:
         SOURCE: ${{ inputs.source }}
+        REQUIRE_DEFAULT: ${{ inputs.require-default-branch }}
+        REF_NAME: ${{ github.ref_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       run: |
         case "$SOURCE" in
           ''|changelog|changesets) ;;
           *) echo "::error::unknown source \"$SOURCE\": changelog, changesets or empty"; exit 1 ;;
         esac
+        if [ "$REQUIRE_DEFAULT" = 'true' ] && [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+          echo "::error::releases run from ${DEFAULT_BRANCH:-the default branch} only, not $REF_NAME"
+          exit 1
+        fi
+
+    # Files that were already dirty are not ours to commit.
+    - name: Snapshot the worktree
+      shell: bash
+      run: |
+        if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+          git -c core.quotepath=off status --porcelain --untracked-files=all |
+            cut -c4- | sort > "$RUNNER_TEMP/prepare-release-before"
+        fi
 
     - name: Changelog
       id: changelog
@@ -82,10 +120,12 @@ runs:
         CHANGELOG: ${{ inputs.changelog }}
         BUMP: ${{ inputs.bump }}
         WRITE: ${{ inputs.write-changelog }}
+        DATE: ${{ inputs.date }}
       run: |
         set -euo pipefail
         args=(--changelog "$CHANGELOG" --bump "$BUMP")
         [ "$WRITE" = 'true' ] && args+=(--write)
+        [ -n "$DATE" ] && args+=(--date "$DATE")
         node "$GITHUB_ACTION_PATH/../changelog/changelog.mjs" "${args[@]}"
 
     - name: Changesets
@@ -110,9 +150,12 @@ runs:
         NOTES_FILE: ${{ inputs.notes-file }}
         WRITE_MANIFEST: ${{ inputs.write-manifest }}
         MANIFEST_DIR: ${{ inputs.manifest-dir }}
+        VERSION_FILES: ${{ inputs.version-files }}
+        DATE: ${{ inputs.date }}
       run: |
         set -euo pipefail
         args=(--bump "$BUMP" --tag-prefix "$TAG_PREFIX")
+        [ -n "$DATE" ] && args+=(--date "$DATE")
         [ -n "$VERSION" ] && args+=(--version "$VERSION")
         [ -n "$PREVIOUS" ] && args+=(--previous "$PREVIOUS")
         [ -n "$NOTES_FILE" ] && args+=(--notes-file "$NOTES_FILE")
@@ -127,3 +170,18 @@ runs:
       shell: bash
       working-directory: ${{ inputs.manifest-dir }}
       run: cargo metadata --format-version 1 > /dev/null
+
+    - name: List changed files
+      id: changed
+      shell: bash
+      run: |
+        set -euo pipefail
+        before="$RUNNER_TEMP/prepare-release-before"
+        [ -f "$before" ] || exit 0
+        files=$(git -c core.quotepath=off status --porcelain --untracked-files=all |
+          cut -c4- | sort | comm -13 "$before" - || true)
+        printf '%s\n' "$files"
+        delimiter="ghadelimiter_$(uuidgen 2>/dev/null || date +%s%N)"
+        printf 'files<<%s\n%s\n%s\n' "$delimiter" "$files" "$delimiter" >> "$GITHUB_OUTPUT"
+        # publish-release in the same job picks this up as its default paths.
+        printf 'PREPARE_RELEASE_CHANGED_FILES<<%s\n%s\n%s\n' "$delimiter" "$files" "$delimiter" >> "$GITHUB_ENV"

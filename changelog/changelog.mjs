@@ -7,6 +7,9 @@ import { opt, flag, die, emit, nextVersion } from '../lib/io.mjs'
 
 const changelogPath = opt('changelog', 'CHANGELOG.md')
 const bumpArg = opt('bump', 'auto')
+// Passed from the first job, so a release that crosses midnight UTC keeps one date.
+const date = opt('date') || new Date().toISOString().slice(0, 10)
+if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) die(`"${date}" is not a yyyy-mm-dd date`)
 
 if (!existsSync(changelogPath)) die(`${changelogPath} not found`)
 const lines = readFileSync(changelogPath, 'utf8').split('\n')
@@ -67,7 +70,6 @@ function trimBottom(blocks) {
 }
 
 function writeChangelog(next) {
-  const date = new Date().toISOString().slice(0, 10)
   // Blank lines are normalised around the new heading only: the rest of the file
   // is the project's own markdown and may contain fenced blocks with gaps.
   const out = [
@@ -76,7 +78,6 @@ function writeChangelog(next) {
     `## [${next}] - ${date}`,
     '',
     ...trimBottom(trimTop(section)),
-    '',
     '',
     ...trimTop(lines.slice(end)),
   ]

@@ -29,10 +29,53 @@ inputs:
   args:
     description: Extra publish arguments
     default: ''
+  npm-version:
+    description: >-
+      npm to install before publishing. auto upgrades to the latest npm when
+      provenance is on and npm is older than 11.5.1, the minimum for trusted
+      publishing. none keeps the runner's npm
+    default: auto
+  pnpm-version:
+    description: pnpm to install before publishing (e.g. 10 or 10.18.0). None when empty
+    default: ''
 
 runs:
   using: composite
   steps:
+    - name: Update npm
+      if: inputs.npm-version != 'none' && inputs.npm-version != ''
+      shell: bash
+      env:
+        NPM_VERSION: ${{ inputs.npm-version }}
+        PROVENANCE: ${{ inputs.provenance }}
+      run: |
+        set -euo pipefail
+        spec="$NPM_VERSION"
+        if [ "$spec" = auto ]; then
+          [ "$PROVENANCE" = 'true' ] || exit 0
+          current=$(npm --version)
+          if node -e '
+            const [a, b] = [process.argv[1], "11.5.1"].map((v) => v.split(".").map(Number))
+            process.exit((a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) >= 0 ? 0 : 1)
+          ' "$current"; then
+            echo "npm $current supports trusted publishing"
+            exit 0
+          fi
+          spec=latest
+        fi
+        npm install -g "npm@$spec"
+        echo "npm $(npm --version)"
+
+    - name: Install pnpm
+      if: inputs.pnpm-version != ''
+      shell: bash
+      env:
+        PNPM_VERSION: ${{ inputs.pnpm-version }}
+      run: |
+        set -euo pipefail
+        npm install -g "pnpm@$PNPM_VERSION"
+        echo "pnpm $(pnpm --version)"
+
     - name: Publish
       shell: bash
       env:

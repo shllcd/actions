@@ -1,5 +1,5 @@
 name: Cargo build
-description: Build a Rust binary for release.
+description: Build a Rust binary, cdylib or N-API binding for release.
 
 inputs:
   target:
@@ -8,8 +8,22 @@ inputs:
   package:
     description: Workspace package to build (-p)
     default: ''
+  kind:
+    description: >-
+      bin packs a binary into tar.gz. cdylib ships the shared library as is.
+      napi ships the cdylib as <napi-name>.<target>.node, the layout
+      napi-packages reads
+    default: bin
   bin:
-    description: Binary to build and ship. Defaults to the first bin target
+    description: Binary to build and ship, for kind bin. Defaults to the first bin target
+    default: ''
+  napi-name:
+    description: Binding name for kind napi (orisu gives orisu.<target>.node). Defaults to the lib name
+    default: ''
+  rustflags:
+    description: >-
+      Extra RUSTFLAGS. cdylib and napi musl targets get -C target-feature=-crt-static
+      automatically, a static CRT cannot be dlopened
     default: ''
   args:
     description: Extra cargo arguments (e.g. --features foo)
@@ -24,15 +38,18 @@ inputs:
     description: Require an up-to-date Cargo.lock
     default: 'true'
   artifact-prefix:
-    description: Artifact name prefix
-    default: ${{ github.event.repository.name }}
+    description: Artifact name prefix. The repository name for bin and cdylib, bindings for napi
+    default: ''
   retention-days:
     description: Artifact retention
     default: '1'
 
 outputs:
+  file:
+    description: Path to the shipped file (the binary, library or .node)
+    value: ${{ steps.package.outputs.file }}
   archive:
-    description: Path to the .tar.gz archive (Windows also gets a .zip)
+    description: Path to the .tar.gz archive (Windows also gets a .zip), for kind bin
     value: ${{ steps.package.outputs.archive }}
   sha256:
     description: Archive checksum
@@ -47,38 +64,56 @@ runs:
         TARGET: ${{ inputs.target }}
       run: rustup target add "$TARGET"
 
-    - name: Resolve binary
+    - name: Resolve target
       id: resolve
       shell: bash
       env:
+        KIND: ${{ inputs.kind }}
         PACKAGE: ${{ inputs.package }}
         BIN: ${{ inputs.bin }}
+        NAPI_NAME: ${{ inputs.napi-name }}
+        PREFIX: ${{ inputs.artifact-prefix }}
+        REPO: ${{ github.event.repository.name }}
       run: |
         set -euo pipefail
-        if [ -n "$BIN" ]; then
-          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          exit 0
+        case "$KIND" in
+          bin) want=bin ;;
+          cdylib|napi) want=cdylib ;;
+          *) echo "::error::unknown kind \"$KIND\": bin, cdylib or napi"; exit 1 ;;
+        esac
+        name="$BIN"
+        if [ "$want" = cdylib ] || [ -z "$name" ]; then
+          name=$(cargo metadata --no-deps --format-version 1 |
+            jq -r --arg pkg "$PACKAGE" --arg kind "$want" '
+              .packages[]
+              | select($pkg == "" or .name == $pkg)
+              | .targets[]
+              | select(.kind | index($kind))
+              | .name' | head -n1)
+          [ -n "$name" ] || { echo "::error::no $want target found${PACKAGE:+ in $PACKAGE}"; exit 1; }
         fi
-        name=$(cargo metadata --no-deps --format-version 1 |
-          jq -r --arg pkg "$PACKAGE" '
-            .packages[]
-            | select($pkg == "" or .name == $pkg)
-            | .targets[]
-            | select(.kind | index("bin"))
-            | .name' | head -n1)
-        [ -n "$name" ] || { echo "::error::no bin target found; pass 'bin:'"; exit 1; }
-        echo "bin=$name" >> "$GITHUB_OUTPUT"
+        if [ -z "$PREFIX" ]; then
+          PREFIX="$REPO"
+          [ "$KIND" = napi ] && PREFIX=bindings
+        fi
+        {
+          echo "name=$name"
+          echo "napi-name=${NAPI_NAME:-$name}"
+          echo "prefix=$PREFIX"
+        } >> "$GITHUB_OUTPUT"
 
     - name: Build
       shell: bash
       env:
+        KIND: ${{ inputs.kind }}
         TARGET: ${{ inputs.target }}
         PACKAGE: ${{ inputs.package }}
-        BIN: ${{ steps.resolve.outputs.bin }}
+        NAME: ${{ steps.resolve.outputs.name }}
         ARGS: ${{ inputs.args }}
         LINKER: ${{ inputs.linker }}
         GLIBC: ${{ inputs.glibc }}
         LOCKED: ${{ inputs.locked }}
+        EXTRA_RUSTFLAGS: ${{ inputs.rustflags }}
       run: |
         set -euo pipefail
         linker="$LINKER"
@@ -88,6 +123,13 @@ runs:
             *) linker=native ;;
           esac
         fi
+        flags="${RUSTFLAGS:-}"
+        if [ "$KIND" != bin ] && [[ "$TARGET" == *-musl* ]]; then
+          flags="$flags -C target-feature=-crt-static"
+        fi
+        [ -n "$EXTRA_RUSTFLAGS" ] && flags="$flags $EXTRA_RUSTFLAGS"
+        flags="${flags# }"
+        [ -n "$flags" ] && export RUSTFLAGS="$flags"
         # cargo-zigbuild replaces the `build` subcommand, it does not wrap it
         cmd=cargo
         args='build'
@@ -99,7 +141,11 @@ runs:
         set -- $args --release --target "$TARGET"
         [ "$LOCKED" = 'true' ] && set -- "$@" --locked
         [ -n "$PACKAGE" ] && set -- "$@" -p "$PACKAGE"
-        [ -n "$BIN" ] && set -- "$@" --bin "$BIN"
+        if [ "$KIND" = bin ]; then
+          set -- "$@" --bin "$NAME"
+        else
+          set -- "$@" --lib
+        fi
         set -x
         $cmd "$@" $ARGS
 
@@ -107,13 +153,38 @@ runs:
       id: package
       shell: bash
       env:
+        KIND: ${{ inputs.kind }}
         TARGET: ${{ inputs.target }}
-        NAME: ${{ steps.resolve.outputs.bin }}
+        NAME: ${{ steps.resolve.outputs.name }}
+        NAPI_NAME: ${{ steps.resolve.outputs.napi-name }}
       run: |
         set -euo pipefail
+        release="target/$TARGET/release"
+        mkdir -p dist
+
+        if [ "$KIND" != bin ]; then
+          # Library file names follow the target, not the runner.
+          lib="${NAME//-/_}"
+          case "$TARGET" in
+            *windows*) library="$lib.dll" ;;
+            *apple*) library="lib$lib.dylib" ;;
+            *) library="lib$lib.so" ;;
+          esac
+          [ -f "$release/$library" ] || { echo "::error::library not found: $release/$library"; exit 1; }
+          if [ "$KIND" = napi ]; then
+            file="dist/$NAPI_NAME.$TARGET.node"
+          else
+            file="dist/${library%.*}-$TARGET.${library##*.}"
+          fi
+          cp "$release/$library" "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "pattern=$file" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
         ext=''
-        [ "$RUNNER_OS" = Windows ] && ext='.exe'
-        binary="target/$TARGET/release/$NAME$ext"
+        [[ "$TARGET" == *windows* ]] && ext='.exe'
+        binary="$release/$NAME$ext"
         [ -f "$binary" ] || { echo "::error::binary not found: $binary"; exit 1; }
 
         stage=$(mktemp -d)
@@ -122,7 +193,6 @@ runs:
           [ -f "$file" ] && cp "$file" "$stage/"
         done
 
-        mkdir -p dist
         archive="dist/$NAME-$TARGET.tar.gz"
         tar -czf "$archive" -C "$stage" .
         if [ "$RUNNER_OS" = Windows ]; then
@@ -132,14 +202,17 @@ runs:
         # macOS has no sha256sum unless coreutils is installed
         sha=$( { sha256sum "$archive" 2>/dev/null || shasum -a 256 "$archive"; } | cut -d' ' -f1)
         echo "$sha  $(basename "$archive")" > "dist/$NAME-$TARGET.sha256"
-        echo "archive=$archive" >> "$GITHUB_OUTPUT"
-        echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+        {
+          echo "file=$binary"
+          echo "archive=$archive"
+          echo "sha256=$sha"
+          echo "pattern=dist/$NAME-$TARGET.*"
+        } >> "$GITHUB_OUTPUT"
 
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
-        name: ${{ inputs.artifact-prefix }}-${{ inputs.target }}
-        path: |
-          dist/${{ steps.resolve.outputs.bin }}-${{ inputs.target }}.*
+        name: ${{ steps.resolve.outputs.prefix }}-${{ inputs.target }}
+        path: ${{ steps.package.outputs.pattern }}
         overwrite: true
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: error

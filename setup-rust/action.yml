@@ -20,6 +20,12 @@ inputs:
   zig:
     description: Install zig and cargo-zigbuild for cross-arch and musl Linux builds
     default: 'false'
+  zig-version:
+    description: Zig version to install (e.g. 0.15.2). Implies zig. Latest when empty
+    default: ''
+  tools:
+    description: Comma-separated tools for taiki-e/install-action (e.g. cargo-codspeed@6.0.0)
+    default: ''
   apt:
     description: Space-separated apt packages for Linux runners (e.g. libgtk-3-dev)
     default: ''
@@ -53,12 +59,27 @@ runs:
       if: inputs.sccache == 'true'
 
     - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-      if: inputs.zig == 'true'
+      if: inputs.zig == 'true' || inputs.zig-version != ''
+      with:
+        version: ${{ inputs.zig-version || 'latest' }}
+
+    - name: Resolve tools
+      id: tools
+      shell: bash
+      env:
+        ZIG: ${{ inputs.zig == 'true' || inputs.zig-version != '' }}
+        TOOLS: ${{ inputs.tools }}
+      run: |
+        tools=()
+        [ "$ZIG" = 'true' ] && tools+=(cargo-zigbuild)
+        for tool in ${TOOLS//,/ }; do tools+=("$tool"); done
+        list=$(IFS=,; echo "${tools[*]-}")
+        echo "list=$list" >> "$GITHUB_OUTPUT"
 
     - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-      if: inputs.zig == 'true'
+      if: steps.tools.outputs.list != ''
       with:
-        tool: cargo-zigbuild
+        tool: ${{ steps.tools.outputs.list }}
 
     - name: Install Linux packages
       if: inputs.apt != '' && runner.os == 'Linux'

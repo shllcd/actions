@@ -11,6 +11,9 @@ inputs:
   write:
     description: Move the Unreleased entries under the new version heading
     default: 'false'
+  date:
+    description: Release date for the new heading, yyyy-mm-dd. Today (UTC) when empty
+    default: ''
 
 outputs:
   version:
@@ -35,8 +38,10 @@ runs:
         CHANGELOG: ${{ inputs.changelog }}
         BUMP: ${{ inputs.bump }}
         WRITE: ${{ inputs.write }}
+        DATE: ${{ inputs.date }}
       run: |
         set -euo pipefail
         args=(--changelog "$CHANGELOG" --bump "$BUMP")
         [ "$WRITE" = 'true' ] && args+=(--write)
+        [ -n "$DATE" ] && args+=(--date "$DATE")
         node "$GITHUB_ACTION_PATH/changelog.mjs" "${args[@]}"

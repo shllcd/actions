@@ -12,6 +12,8 @@ const tagPrefix = opt('tag-prefix', 'v')
 const notesPath = opt('notes-file', join(process.env.RUNNER_TEMP || tmpdir(), 'release-notes.md'))
 const manifestDir = opt('manifest-dir', '.')
 const notes = process.env.NOTES ?? ''
+const date = opt('date') || new Date().toISOString().slice(0, 10)
+if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) die(`"${date}" is not a yyyy-mm-dd date`)
 
 let version = opt('version')
 let previous = opt('previous')
@@ -28,11 +30,12 @@ if (!version) {
 if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) die(`"${version}" is not a semver version`)
 
 if (flag('write-manifest')) writeManifest(version)
+writeVersionFiles(version, process.env.VERSION_FILES ?? '')
 
 mkdirSync(dirname(notesPath), { recursive: true })
 writeFileSync(notesPath, `${notes}\n`)
 // Notes travel as text: a path in RUNNER_TEMP is gone by the next job.
-emit({ version, tag: `${tagPrefix}${version}`, previous, bump, notes, 'notes-file': notesPath })
+emit({ version, tag: `${tagPrefix}${version}`, previous, bump, date, notes, 'notes-file': notesPath })
 
 function latestTag() {
   let tags = ''
@@ -88,5 +91,39 @@ function writeManifest(next) {
       writeFileSync(manifestPath('Cargo.toml'), patched.join('\n'))
       console.error(`Cargo.toml -> ${next}`)
     }
+  }
+}
+
+// One `path:regex` per line. The first capture group holds the version; a
+// pattern that matches nothing fails, so a renamed constant cannot slip through.
+function writeVersionFiles(next, spec) {
+  for (const raw of spec.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const colon = line.indexOf(':')
+    if (colon <= 0) die(`version-files: "${line}" is not path:regex`)
+    const path = line.slice(0, colon).trim()
+    let pattern
+    try {
+      // d: match indices, so only the captured version is replaced.
+      pattern = new RegExp(line.slice(colon + 1), 'gmd')
+    } catch (error) {
+      die(`version-files: bad regex for ${path}: ${error.message}`)
+    }
+    if (!existsSync(path)) die(`version-files: ${path} not found`)
+    const text = readFileSync(path, 'utf8')
+    const matches = [...text.matchAll(pattern)]
+    if (matches.some((match) => match.length < 2)) {
+      die(`version-files: the regex for ${path} needs a capture group around the version`)
+    }
+    let patched = text
+    for (const match of matches.reverse()) {
+      const [from, to] = match.indices[1]
+      patched = patched.slice(0, from) + next + patched.slice(to)
+    }
+    const count = matches.length
+    if (count === 0) die(`version-files: /${pattern.source}/ matched nothing in ${path}`)
+    if (patched !== text) writeFileSync(path, patched)
+    console.error(`${path} -> ${next} (${count} match${count === 1 ? '' : 'es'})`)
   }
 }

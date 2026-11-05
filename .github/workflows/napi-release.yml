@@ -1,0 +1,200 @@
+name: N-API release
+
+# prepare -> build matrix -> publish to npm -> commit, tag and release.
+# The caller grants contents: write and id-token: write, and puts its own
+# checks in front with needs:.
+on:
+  workflow_call:
+    inputs:
+      crate:
+        description: Cargo package with the cdylib (-p)
+        type: string
+        required: true
+      package-dir:
+        description: Main npm package directory
+        type: string
+        required: true
+      targets:
+        description: Newline- or comma-separated Rust targets
+        type: string
+        default: |
+          x86_64-unknown-linux-gnu
+          aarch64-unknown-linux-gnu
+          x86_64-unknown-linux-musl
+          aarch64-unknown-linux-musl
+          x86_64-apple-darwin
+          aarch64-apple-darwin
+          x86_64-pc-windows-msvc
+          aarch64-pc-windows-msvc
+      napi-name:
+        description: Binding file name, <napi-name>.<target>.node. Defaults to the lib name
+        type: string
+        default: ''
+      binding-name:
+        description: npm name template for the bindings, e.g. @orisu/binding-{platform}
+        type: string
+        default: '{name}-{platform}'
+      version-files:
+        description: path:regex lines for prepare-release
+        type: string
+        default: ''
+      build-command:
+        description: Command run in package-dir before publishing, e.g. npm install --ignore-scripts && npm run build
+        type: string
+        default: ''
+      glibc:
+        description: glibc floor for gnu targets
+        type: string
+        default: '.2.17'
+      zig-version:
+        description: Zig version for Linux targets. Latest when empty
+        type: string
+        default: ''
+      node-version:
+        description: Node.js version for publishing
+        type: string
+        default: '24'
+      pnpm-version:
+        description: pnpm to install before build-command, e.g. 10. None when empty
+        type: string
+        default: ''
+      environment:
+        description: Deployment environment of the publish job
+        type: string
+        default: release
+    outputs:
+      version:
+        description: Released version
+        value: ${{ jobs.prepare.outputs.version }}
+      tag:
+        description: Released tag
+        value: ${{ jobs.prepare.outputs.tag }}
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      date: ${{ steps.version.outputs.date }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: version
+        uses: shllcd/actions/prepare-release@v1
+        with:
+          source: changelog
+          require-default-branch: true
+      - id: matrix
+        env:
+          TARGETS: ${{ inputs.targets }}
+          GLIBC: ${{ inputs.glibc }}
+        run: |
+          set -euo pipefail
+          matrix=$(printf '%s\n' ${TARGETS//,/ } | jq -Rnc '[inputs | select(. != "") | {
+            target: .,
+            host: (if test("windows") then "windows-latest" elif test("apple") then "macos-latest" else "ubuntu-latest" end),
+            zig: test("linux"),
+            glibc: (if test("linux-gnu") then $glibc else "" end)
+          }] | {include: .}' --arg glibc "$GLIBC")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.host }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shllcd/actions/setup-rust@v1
+        with:
+          targets: ${{ matrix.target }}
+          zig: ${{ matrix.zig }}
+          zig-version: ${{ matrix.zig && inputs.zig-version || '' }}
+      - uses: shllcd/actions/cargo-build@v1
+        with:
+          kind: napi
+          target: ${{ matrix.target }}
+          package: ${{ inputs.crate }}
+          napi-name: ${{ inputs.napi-name }}
+          glibc: ${{ matrix.glibc }}
+
+  publish:
+    name: Publish to npm
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+      - name: Install pnpm
+        if: inputs.pnpm-version != ''
+        env:
+          PNPM_VERSION: ${{ inputs.pnpm-version }}
+        run: npm install -g "pnpm@$PNPM_VERSION"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bindings-*
+          path: artifacts
+      - uses: shllcd/actions/prepare-release@v1
+        with:
+          source: changelog
+          write-manifest: true
+          manifest-dir: ${{ inputs.package-dir }}
+          version-files: ${{ inputs.version-files }}
+          date: ${{ needs.prepare.outputs.date }}
+      - name: Build package
+        if: inputs.build-command != ''
+        working-directory: ${{ inputs.package-dir }}
+        run: ${{ inputs.build-command }}
+      - id: packages
+        uses: shllcd/actions/napi-packages@v1
+        with:
+          package-dir: ${{ inputs.package-dir }}
+          name: ${{ inputs.binding-name }}
+      - uses: shllcd/actions/publish-npm@v1
+        with:
+          dirs: ${{ steps.packages.outputs.dir }}/*
+      - uses: shllcd/actions/publish-npm@v1
+        with:
+          path: ${{ inputs.package-dir }}
+
+  release:
+    name: Commit, tag and release
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        uses: shllcd/actions/prepare-release@v1
+        with:
+          source: changelog
+          write-manifest: true
+          write-changelog: true
+          manifest-dir: ${{ inputs.package-dir }}
+          version-files: ${{ inputs.version-files }}
+          date: ${{ needs.prepare.outputs.date }}
+      - uses: shllcd/actions/publish-release@v1
+        with:
+          tag: ${{ steps.version.outputs.tag }}
+          notes: ${{ steps.version.outputs.notes }}
+          files: '' # npm only, binaries ship in the packages

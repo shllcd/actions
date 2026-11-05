@@ -178,6 +178,49 @@ expect 'multi-line notes use a delimiter' 'yes' "$(grep -q '^notes<<ghadelimiter
 expect 'notes text is the unreleased section' 'yes' "$(grep -q '^### Fixed$' output && echo yes || echo no)"
 expect 'notes-file output is the path' 'yes' "$(grep -q '^notes-file=notes.md$' output && echo yes || echo no)"
 
+# One blank line between the new section and the previous release, and a fixed date.
+printf '%s\n' '## [Unreleased]' '' '### Fixed' '' '- z' '' '## [1.0.0] - 2026-01-01' > CHANGELOG.md
+node "$OLDPWD/$changelog" --write --date 2026-03-04 > /dev/null
+expect 'date input is used' 'yes' "$(grep -q '^## \[1.0.1\] - 2026-03-04$' CHANGELOG.md && echo yes || echo no)"
+expect 'one blank line before the previous release' '- z||## [1.0.0] - 2026-01-01' "$(grep -A2 '^- z$' CHANGELOG.md | paste -sd'|' -)"
+out=$(GITHUB_OUTPUT="$work/date-out" node "$OLDPWD/$release" --version 1.0.1 --date 2026-03-04)
+expect 'date output' 'yes' "$(grep -q '^date=2026-03-04$' "$work/date-out" && echo yes || echo no)"
+
+# version-files: the capture group is replaced, a miss fails.
+printf 'export const VERSION = "0.0.0";\nconst other = "0.0.0";\n' > cli.ts
+VERSION_FILES='cli.ts:const VERSION = "([^"]*)";' node "$OLDPWD/$release" --version 2.3.4 > /dev/null
+expect 'version-files replaces the group' 'export const VERSION = "2.3.4";' "$(sed -n 1p cli.ts)"
+expect 'version-files leaves the rest' 'const other = "0.0.0";' "$(sed -n 2p cli.ts)"
+if out=$(VERSION_FILES='cli.ts:NOPE = "([^"]*)"' node "$OLDPWD/$release" --version 2.3.4 2>&1); then
+  echo 'FAIL version-files miss must fail'; fail=1
+else
+  expect 'version-files miss fails' 'yes' "$(echo "$out" | grep -q 'matched nothing' && echo yes || echo no)"
+fi
+if out=$(VERSION_FILES='cli.ts:VERSION' node "$OLDPWD/$release" --version 2.3.4 2>&1); then
+  echo 'FAIL version-files without a group must fail'; fail=1
+else
+  expect 'version-files needs a group' 'yes' "$(echo "$out" | grep -q 'capture group' && echo yes || echo no)"
+fi
+
+# napi-packages: one package per binding with os, cpu and libc.
+mkdir -p napi/pkg napi/artifacts/bindings-a napi/artifacts/bindings-b napi/artifacts/bindings-c
+echo '{"name":"orisu","version":"0.5.0","license":"MIT","repository":"github:x/orisu","optionalDependencies":{"@orisu/binding-linux-x64-musl":"0.5.0","@orisu/binding-darwin-arm64":"0.5.0"}}' > napi/pkg/package.json
+touch napi/artifacts/bindings-a/orisu.x86_64-unknown-linux-musl.node napi/artifacts/bindings-b/orisu.aarch64-apple-darwin.node napi/artifacts/bindings-c/orisu.x86_64-pc-windows-msvc.node
+( cd napi && node "$root/napi-packages/napi-packages.mjs" --package-dir pkg --name '@orisu/binding-{platform}' > /dev/null )
+musl=napi/dist/npm/linux-x64-musl/package.json
+expect 'napi package name' '@orisu/binding-linux-x64-musl' "$(node -p "require('./$musl').name")"
+expect 'napi libc' 'musl' "$(node -p "require('./$musl').libc.join()")"
+expect 'napi version from main package' '0.5.0' "$(node -p "require('./$musl').version")"
+expect 'napi license copied' 'MIT' "$(node -p "require('./$musl').license")"
+expect 'napi windows platform' 'win32 x64' "$(node -p "const p = require('./napi/dist/npm/win32-x64-msvc/package.json'); p.os + ' ' + p.cpu")"
+expect 'napi binary staged' 'yes' "$([ -f napi/dist/npm/darwin-arm64/orisu.aarch64-apple-darwin.node ] && echo yes || echo no)"
+rm napi/artifacts/bindings-b/*.node
+if out=$(cd napi && node "$root/napi-packages/napi-packages.mjs" --package-dir pkg --name '@orisu/binding-{platform}' 2>&1); then
+  echo 'FAIL napi missing binding must fail'; fail=1
+else
+  expect 'napi missing binding fails' 'yes' "$(echo "$out" | grep -q 'darwin-arm64' && echo yes || echo no)"
+fi
+
 # No source: the latest tag plus bump, or an explicit version.
 git init -q tags && cd tags
 release=$root/prepare-release/release.mjs

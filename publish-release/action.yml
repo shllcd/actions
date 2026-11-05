@@ -27,8 +27,11 @@ inputs:
     description: Branch to push the bump to
     default: ${{ github.ref_name }}
   paths:
-    description: Space-separated paths to stage. Everything by default
-    default: '.'
+    description: >-
+      Space-separated paths to stage. Empty stages the changed-files of
+      prepare-release in this job (plus a refreshed Cargo.lock), or everything
+      when prepare-release did not run here
+    default: ''
   token:
     description: Token with contents write. Defaults to the workflow token
     default: ''
@@ -59,15 +62,41 @@ runs:
         git config user.name 'github-actions[bot]'
         git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
+        if [ -n "$PATHS" ]; then
+          git add -A -- $PATHS
+        elif [ -n "${PREPARE_RELEASE_CHANGED_FILES+set}" ]; then
+          while IFS= read -r file; do
+            [ -n "$file" ] && git add -A -- "$file"
+          done <<< "$PREPARE_RELEASE_CHANGED_FILES"
+          git ls-files -m -- '*Cargo.lock' | while IFS= read -r lock; do git add -- "$lock"; done
+        else
+          git add -A -- .
+        fi
         # The bump may already be committed by a previous run of the workflow.
-        git add -A -- $PATHS
         if git diff --cached --quiet; then
           echo "nothing to commit, $BRANCH is already released"
           exit 0
         fi
 
         git commit -m "release: $TAG"
-        git push origin "HEAD:$BRANCH"
+        # The branch may have moved while the release was building. Replay the
+        # bump commit on top instead of rebasing: the checkout is often shallow.
+        bump=$(git rev-parse HEAD)
+        for attempt in 1 2 3; do
+          if git push origin "HEAD:$BRANCH"; then
+            exit 0
+          fi
+          echo "push rejected (attempt $attempt), replaying the bump on origin/$BRANCH"
+          git fetch --depth=1 origin "$BRANCH"
+          git reset -q --hard FETCH_HEAD
+          if ! git cherry-pick "$bump"; then
+            git cherry-pick --abort || true
+            echo "::error::$BRANCH moved and conflicts with the release commit. Re-run the workflow: published versions are skipped"
+            exit 1
+          fi
+        done
+        echo "::error::could not push to $BRANCH after 3 attempts. Re-run the workflow: published versions are skipped"
+        exit 1
 
     - name: Checksums
       if: inputs.files != ''
@@ -140,9 +169,12 @@ runs:
         fi
 
         # A published tag is immutable for consumers: fail instead of moving it.
-        if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
-          current=$(git rev-parse "refs/tags/$TAG^{commit}")
-          head=$(git rev-parse HEAD)
+        # Ask the remote: a shallow checkout has no tags locally.
+        head=$(git rev-parse HEAD)
+        remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+        # An annotated tag lists the tag object and the peeled commit; prefer the latter.
+        current=$(printf '%s\n' "$remote" | sort -k2 | awk 'NF { sha = $1 } END { print sha }')
+        if [ -n "$current" ]; then
           if [ "$current" != "$head" ]; then
             echo "::error::tag $TAG points at ${current:0:12}, refusing to move it to ${head:0:12}"
             exit 1
@@ -150,7 +182,7 @@ runs:
           echo "tag $TAG already points at HEAD"
         else
           # Tag here, so the release cannot land on another commit.
-          git tag "$TAG"
+          git tag -f "$TAG"
           git push origin "refs/tags/$TAG"
         fi
 

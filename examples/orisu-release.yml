@@ -10,32 +10,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: Prepare
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      notes: ${{ steps.version.outputs.notes }}
-    steps:
-      - name: Require default branch
-        if: github.ref_name != github.event.repository.default_branch
-        run: |
-          echo "::error::Releases run from ${{ github.event.repository.default_branch }} only"
-          exit 1
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - id: version
-        uses: shllcd/actions/prepare-release@v1
-        with:
-          source: changelog
-
   verify:
     name: Verify
-    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,116 +36,19 @@ jobs:
           npm install --ignore-scripts
           npm run typecheck
 
-  build-native:
-    name: Build ${{ matrix.target }}
-    needs: prepare
-    runs-on: ${{ matrix.host }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: true, glibc: .2.17 }
-          - { host: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: true, glibc: .2.17 }
-          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, zig: true }
-          - { host: ubuntu-latest, target: aarch64-unknown-linux-musl, zig: true }
-          - { host: macos-latest, target: aarch64-apple-darwin }
-          - { host: macos-latest, target: x86_64-apple-darwin }
-          - { host: windows-latest, target: x86_64-pc-windows-msvc }
-          - { host: windows-latest, target: aarch64-pc-windows-msvc }
-    steps:
-      - uses: actions/checkout@v7
-      # Replaces setup-zig + cargo-zigbuild + rustup target add + handler setup.
-      - uses: shllcd/actions/setup-rust@v1
-        with:
-          targets: ${{ matrix.target }}
-          zig: ${{ matrix.zig }}
-      - name: Build
-        shell: bash
-        run: cargo ${{ matrix.zig && 'zigbuild' || 'build' }} --release -p orisu_napi --target ${{ matrix.target }}${{ matrix.glibc }}
-      - name: Stage binding
-        shell: bash
-        run: |
-          case "${{ matrix.target }}" in
-            *windows*) library=orisu_napi.dll ;;
-            *darwin*) library=liborisu_napi.dylib ;;
-            *) library=liborisu_napi.so ;;
-          esac
-          mkdir -p bindings
-          cp "target/${{ matrix.target }}/release/$library" "bindings/orisu.${{ matrix.target }}.node"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: bindings-${{ matrix.target }}
-          path: bindings/orisu.${{ matrix.target }}.node
-          retention-days: 1
-          if-no-files-found: error
-
-  publish:
-    name: Publish to npm
-    needs: [prepare, verify, build-native]
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write # npm trusted publishing, no NPM_TOKEN
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: bindings-*
-          path: artifacts
-      # No release-patch artifact and no `git apply`: the version is derived
-      # from CHANGELOG.md again, which gives the same result.
-      - id: version
-        uses: shllcd/actions/prepare-release@v1
-        with:
-          source: changelog
-          write-manifest: true
-          manifest-dir: packages/orisu
-      # The version is also hardcoded in the CLI, the action cannot know that.
-      - name: Sync the CLI version constant
-        run: sed -i -E "s/const VERSION = \"[^\"]*\";/const VERSION = \"${{ steps.version.outputs.version }}\";/" packages/orisu/src/cli.ts
-      - name: Build package
-        working-directory: packages/orisu
-        run: |
-          npm install --ignore-scripts
-          npm run build
-      - name: Stage native packages
-        run: node .github/scripts/release.mjs packages
-      - uses: shllcd/actions/publish-npm@v1
-        with:
-          dirs: dist/npm/*
-      - uses: shllcd/actions/publish-npm@v1
-        with:
-          path: packages/orisu
-
+  # Prepare, the 8-target build, npm publish and the release commit in one call.
   release:
-    name: Commit, tag and release
-    needs: [prepare, publish]
-    runs-on: ubuntu-latest
+    needs: verify
     permissions:
       contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - id: version
-        uses: shllcd/actions/prepare-release@v1
-        with:
-          source: changelog
-          write-manifest: true
-          write-changelog: true
-          manifest-dir: packages/orisu
-      # The version is also hardcoded in the CLI, the action cannot know that.
-      - name: Sync the CLI version constant
-        run: sed -i -E "s/const VERSION = \"[^\"]*\";/const VERSION = \"${{ steps.version.outputs.version }}\";/" packages/orisu/src/cli.ts
-      - uses: shllcd/actions/publish-release@v1
-        with:
-          tag: ${{ steps.version.outputs.tag }}
-          notes: ${{ steps.version.outputs.notes }}
-          files: '' # npm only, no binaries
+      id-token: write
+    uses: shllcd/actions/.github/workflows/napi-release.yml@v1
+    with:
+      crate: orisu_napi
+      package-dir: packages/orisu
+      napi-name: orisu
+      binding-name: '@orisu/binding-{platform}'
+      zig-version: 0.15.2
+      build-command: npm install --ignore-scripts && npm run build
+      version-files: |
+        packages/orisu/src/cli.ts:const VERSION = "([^"]*)";

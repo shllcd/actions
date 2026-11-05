@@ -13,7 +13,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Release logic
         run: bash test/prepare-release.sh
@@ -23,6 +26,26 @@ jobs:
           set -euo pipefail
           bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -color .github/workflows/*.yml examples/*.yml
+
+      # A stale pin would ship old action code under a new tag.
+      - name: Check reusable workflow pins
+        run: |
+          set -euo pipefail
+          ok=true
+          for workflow in .github/workflows/napi-release.yml; do
+            if grep -nE 'uses: [^ ]+@' "$workflow" | grep -vE '@[0-9a-f]{40}'; then
+              echo "::error file=$workflow::pin every uses: to a commit SHA"
+              ok=false
+            fi
+            grep -oE 'shllcd/actions/[a-z-]+@[0-9a-f]{40}' "$workflow" | sort -u | while IFS=@ read -r ref sha; do
+              dir=${ref#shllcd/actions/}
+              if ! git diff --quiet "$sha" HEAD -- "$dir" lib changelog changesets; then
+                echo "::error file=$workflow::$dir changed since $sha, re-pin it to the commit with the change"
+                exit 1
+              fi
+            done || ok=false
+          done
+          $ok
 
       # actionlint reads action.yml as a workflow, so the composite action
       # contract is checked here instead.

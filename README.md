@@ -38,3 +38,7 @@ jobs:
 ```
 
 See [`examples/orisu-release.yml`](examples/orisu-release.yml).
+
+Every `uses:` inside the workflow is pinned to a commit, so pinning the workflow
+itself to a release SHA pins the whole chain. Only the release job keeps the
+checkout token, and both publish and release run in `environment`.

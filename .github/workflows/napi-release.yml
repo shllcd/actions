@@ -3,6 +3,8 @@ name: N-API release
 # prepare -> build matrix -> publish to npm -> commit, tag and release.
 # The caller grants contents: write and id-token: write, and puts its own
 # checks in front with needs:.
+# shllcd/actions refs point at the last commit that changed the actions: a
+# workflow cannot pin the commit it lives in.
 on:
   workflow_call:
     inputs:
@@ -59,7 +61,7 @@ on:
         type: string
         default: ''
       environment:
-        description: Deployment environment of the publish job
+        description: Deployment environment of the publish and release jobs
         type: string
         default: release
     outputs:
@@ -84,11 +86,12 @@ jobs:
       date: ${{ steps.version.outputs.date }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - id: version
-        uses: shllcd/actions/prepare-release@v1
+        uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           source: changelog
           require-default-branch: true
@@ -116,13 +119,15 @@ jobs:
       fail-fast: true
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: shllcd/actions/setup-rust@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shllcd/actions/setup-rust@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           targets: ${{ matrix.target }}
           zig: ${{ matrix.zig }}
           zig-version: ${{ matrix.zig && inputs.zig-version || '' }}
-      - uses: shllcd/actions/cargo-build@v1
+      - uses: shllcd/actions/cargo-build@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           kind: napi
           target: ${{ matrix.target }}
@@ -139,8 +144,10 @@ jobs:
       contents: read
       id-token: write # npm trusted publishing
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ inputs.node-version }}
           package-manager-cache: false
@@ -149,11 +156,11 @@ jobs:
         env:
           PNPM_VERSION: ${{ inputs.pnpm-version }}
         run: npm install -g "pnpm@$PNPM_VERSION"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: bindings-*
           path: artifacts
-      - uses: shllcd/actions/prepare-release@v1
+      - uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           source: changelog
           write-manifest: true
@@ -165,14 +172,14 @@ jobs:
         working-directory: ${{ inputs.package-dir }}
         run: ${{ inputs.build-command }}
       - id: packages
-        uses: shllcd/actions/napi-packages@v1
+        uses: shllcd/actions/napi-packages@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           package-dir: ${{ inputs.package-dir }}
           name: ${{ inputs.binding-name }}
-      - uses: shllcd/actions/publish-npm@v1
+      - uses: shllcd/actions/publish-npm@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           dirs: ${{ steps.packages.outputs.dir }}/*
-      - uses: shllcd/actions/publish-npm@v1
+      - uses: shllcd/actions/publish-npm@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           path: ${{ inputs.package-dir }}
 
@@ -180,12 +187,14 @@ jobs:
     name: Commit, tag and release
     needs: [prepare, publish]
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      # The only checkout that keeps the token: publish-release pushes the bump and the tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
-        uses: shllcd/actions/prepare-release@v1
+        uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           source: changelog
           write-manifest: true
@@ -193,7 +202,7 @@ jobs:
           manifest-dir: ${{ inputs.package-dir }}
           version-files: ${{ inputs.version-files }}
           date: ${{ needs.prepare.outputs.date }}
-      - uses: shllcd/actions/publish-release@v1
+      - uses: shllcd/actions/publish-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
         with:
           tag: ${{ steps.version.outputs.tag }}
           notes: ${{ steps.version.outputs.notes }}

@@ -38,10 +38,22 @@ inputs:
   pnpm-version:
     description: pnpm to install before publishing (e.g. 10 or 10.18.0). None when empty
     default: ''
+  node-version:
+    description: Node.js to install first through actions/setup-node (e.g. 24). Keeps the runner's Node when empty
+    default: ''
+  pnpm-cache:
+    description: Cache the pnpm store, keyed on every pnpm-lock.yaml. Needs pnpm-version
+    default: 'false'
 
 runs:
   using: composite
   steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      if: inputs.node-version != ''
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
+
     - name: Update npm
       if: inputs.npm-version != 'none' && inputs.npm-version != ''
       shell: bash
@@ -75,6 +87,19 @@ runs:
         set -euo pipefail
         npm install -g "pnpm@$PNPM_VERSION"
         echo "pnpm $(pnpm --version)"
+
+    - name: Locate pnpm store
+      id: pnpm-store
+      if: inputs.pnpm-version != '' && inputs.pnpm-cache == 'true'
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      if: steps.pnpm-store.outputs.path != ''
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-store-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: pnpm-store-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Publish
       shell: bash

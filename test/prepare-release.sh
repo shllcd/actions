@@ -128,6 +128,23 @@ expect 'path dep without version gains one' 'tyx-ir = { path = "../ir", version 
 expect 'path dep with version is bumped' 'tyx-derive = { path = "../derive", version = "0.4.1" }' "$(sed -n '7p' Cargo.toml)"
 expect 'dev-dependencies path version bumped too' 'helper = { path = "../helper", version = "0.4.1" }' "$(sed -n '10p' Cargo.toml)"
 
+# Workspace layout: the version lives in [workspace.package]
+cat > Cargo.toml <<'EOF'
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.4.0"
+
+[workspace.dependencies]
+tyx = { path = "crates/tyx" }
+serde = { version = "1" }
+EOF
+node "$OLDPWD/$release" --version 0.4.1 --write-manifest > /dev/null
+expect 'workspace package version bumped' 'version = "0.4.1"' "$(sed -n '5p' Cargo.toml)"
+expect 'workspace path dep gains the version' 'tyx = { path = "crates/tyx", version = "0.4.1" }' "$(sed -n '8p' Cargo.toml)"
+expect 'workspace registry dep untouched' 'serde = { version = "1" }' "$(sed -n '9p' Cargo.toml)"
+
 # napi layout: optional dependencies follow the package version
 cat > package.json <<'EOF'
 {"name":"orisu","version":"0.4.0","optionalDependencies":{"@orisu/binding-darwin-x64":"0.4.0"}}

@@ -70,7 +70,8 @@ function writeManifest(next) {
         section = header[1].trim()
         return line
       }
-      if (section === 'package' && !bumpedPackage && /^\s*version\s*=\s*"/.test(line)) {
+      const isPackageSection = section === 'package' || section === 'workspace.package'
+      if (isPackageSection && !bumpedPackage && /^\s*version\s*=\s*"/.test(line)) {
         bumpedPackage = true
         return line.replace(/version\s*=\s*"[^"]*"/, `version = "${next}"`)
       }

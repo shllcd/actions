@@ -91,7 +91,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: version
-        uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+        uses: shllcd/actions/prepare-release@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           source: changelog
           require-default-branch: true
@@ -122,12 +122,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: shllcd/actions/setup-rust@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/setup-rust@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           targets: ${{ matrix.target }}
           zig: ${{ matrix.zig }}
           zig-version: ${{ matrix.zig && inputs.zig-version || '' }}
-      - uses: shllcd/actions/cargo-build@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/cargo-build@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           kind: napi
           target: ${{ matrix.target }}
@@ -160,7 +160,7 @@ jobs:
         with:
           pattern: bindings-*
           path: artifacts
-      - uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/prepare-release@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           source: changelog
           write-manifest: true
@@ -172,14 +172,14 @@ jobs:
         working-directory: ${{ inputs.package-dir }}
         run: ${{ inputs.build-command }}
       - id: packages
-        uses: shllcd/actions/napi-packages@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+        uses: shllcd/actions/napi-packages@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           package-dir: ${{ inputs.package-dir }}
           name: ${{ inputs.binding-name }}
-      - uses: shllcd/actions/publish-npm@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/publish-npm@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           dirs: ${{ steps.packages.outputs.dir }}/*
-      - uses: shllcd/actions/publish-npm@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/publish-npm@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           path: ${{ inputs.package-dir }}
 
@@ -194,7 +194,7 @@ jobs:
       # The only checkout that keeps the token: publish-release pushes the bump and the tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: version
-        uses: shllcd/actions/prepare-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+        uses: shllcd/actions/prepare-release@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           source: changelog
           write-manifest: true
@@ -202,7 +202,7 @@ jobs:
           manifest-dir: ${{ inputs.package-dir }}
           version-files: ${{ inputs.version-files }}
           date: ${{ needs.prepare.outputs.date }}
-      - uses: shllcd/actions/publish-release@2b1f5cf9be8d20bb5e46265efb2bf190c1e67ac0
+      - uses: shllcd/actions/publish-release@22c403abeebfd50abaad8abcc8d2ce878b71cc9e
         with:
           tag: ${{ steps.version.outputs.tag }}
           notes: ${{ steps.version.outputs.notes }}
